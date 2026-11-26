@@ -29,13 +29,20 @@ function lockDatabase(mode, work) {
   });
 }
 
+// The lock page stores the key as raw bytes: Safari's service worker cannot read CryptoKeys from IndexedDB
+// (WebKit bugs 183167, 312279). Records from before that change (a CryptoKey under "key") are ignored, so such a
+// device asks for the password once more.
+let lockImported = null; // {savedAt, key} of the record imported last, so every request does not import again
 async function lockKey() {
   let saved;
   try { saved = await lockDatabase('readonly', store => store.get('content')); } catch { return null; }
-  if (!saved || saved.keyId !== LOCK.keyId) return null;
-  if (saved.key) return saved.key;
-  if (saved.raw) return crypto.subtle.importKey('raw', saved.raw, {name: 'AES-GCM'}, false, ['decrypt']);
-  return null;
+  if (!saved || saved.keyId !== LOCK.keyId || !saved.raw || saved.raw.byteLength !== 32) return null;
+  if (lockImported && lockImported.savedAt === saved.savedAt) return lockImported.key;
+  try {
+    const key = await crypto.subtle.importKey('raw', saved.raw, {name: 'AES-GCM'}, false, ['decrypt']);
+    lockImported = {savedAt: saved.savedAt, key};
+    return key;
+  } catch { return null; }
 }
 
 // Relative path of the encrypted file for a request path, or null for files that are published as they are.
@@ -116,9 +123,12 @@ self.addEventListener('activate', event => event.waitUntil((async () => {
   if (!(await lockKey())) await caches.delete(CACHE);
 })()));
 
-// The lock page asks which key this worker expects before it reloads into the site.
+// The lock page asks which key this worker expects, and whether it can read the stored key, before it reloads.
 self.addEventListener('message', event => {
-  if (event.data && event.data.type === 'sjrawa-lock-ping' && event.ports[0]) event.ports[0].postMessage({keyId: LOCK.keyId});
+  if (!event.data || event.data.type !== 'sjrawa-lock-ping' || !event.ports[0]) return;
+  const port = event.ports[0];
+  const answer = hasKey => port.postMessage({keyId: LOCK.keyId, hasKey});
+  event.waitUntil(lockKey().then(key => answer(Boolean(key)), () => answer(false)));
 });
 // ----- Original offline worker (dist/abi-sw.js) -------------------------------------------------------------------
 const CACHE = 'sjrawa-abitur-offline-assets-v1';

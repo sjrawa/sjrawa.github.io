@@ -76,27 +76,32 @@
         };
       });
     }
+    // The key is kept as raw bytes, not as a CryptoKey: Safari's service worker cannot read CryptoKeys stored in
+    // IndexedDB (WebKit bugs 183167, 312279), so the site would never open there.
+    const usable = saved => Boolean(saved && saved.keyId === LOCK.keyId && saved.raw && saved.raw.byteLength === 32);
     async function remember(raw) {
-      const entry = {keyId: LOCK.keyId, savedAt: new Date().toISOString()};
-      const key = await crypto.subtle.importKey('raw', raw, {name: 'AES-GCM'}, false, ['decrypt']);
-      // Keep a non-extractable key; browsers that cannot store keys in IndexedDB get the raw bytes instead.
-      try { await database('readwrite', store => store.put({...entry, key}, 'content')); }
-      catch { await database('readwrite', store => store.put({...entry, raw: new Uint8Array(raw)}, 'content')); }
+      await database('readwrite', store => store.put({keyId: LOCK.keyId, raw: new Uint8Array(raw), savedAt: new Date().toISOString()}, 'content'));
     }
     function ping(worker) {
       return new Promise(resolve => {
         const channel = new MessageChannel();
-        const timer = setTimeout(() => resolve(null), 1000);
-        channel.port1.onmessage = event => { clearTimeout(timer); resolve(event.data && event.data.keyId || null); };
+        const timer = setTimeout(() => resolve(null), 1500);
+        channel.port1.onmessage = event => { clearTimeout(timer); resolve(event.data || null); };
         worker.postMessage({type: 'sjrawa-lock-ping'}, [channel.port2]);
       });
     }
+    // Wait until the active service worker expects this key and can read it from IndexedDB.
     async function workerReady() {
       const registration = await navigator.serviceWorker.register('/abi-sw.js', {scope: '/', updateViaCache: 'none'});
       try { await registration.update(); } catch { /* the worker that is already installed may be current */ }
+      let unreadable = 0;
       for (let attempt = 0; attempt < 60; attempt++) {
         const current = await navigator.serviceWorker.getRegistration('/');
-        if (current && current.active && await ping(current.active) === LOCK.keyId) return;
+        const answer = current && current.active ? await ping(current.active) : null;
+        if (answer && answer.keyId === LOCK.keyId) {
+          if (answer.hasKey) return;
+          if (++unreadable >= 8) throw new Error('nokey');
+        }
         await new Promise(resolve => setTimeout(resolve, 250));
       }
       throw new Error('worker');
@@ -113,6 +118,7 @@
       const reason = error && error.message;
       if (reason === 'loop') say('密码已经记住，但网站没有打开。请把这个页面（或主屏幕上的应用）完全关掉，再重新打开。', true);
       else if (reason === 'worker') say('网站的离线组件没有启动。' + BROWSER, true);
+      else if (reason === 'nokey') say('密码正确，但浏览器的离线组件读不到它。请把这个提示截图，发给 AI 助手。', true);
       else say('打开失败：' + (reason || error), true);
     }
     form.addEventListener('submit', async event => {
@@ -141,9 +147,10 @@
     // Without the current key, no decrypted offline copy may stay on the device (locked, or password changed).
     const forgetCopy = () => caches.delete('sjrawa-abitur-offline-assets-v1').catch(() => {});
     database('readonly', store => store.get('content')).then(saved => {
-      if (saved && saved.keyId === LOCK.keyId) { button.disabled = true; say('这台设备已记住密码，正在打开…'); openSite().catch(failed); return; }
+      if (usable(saved)) { button.disabled = true; say('这台设备已记住密码，正在打开…'); openSite().catch(failed); return; }
       forgetCopy();
-      if (saved) say('网站密码已经更换，请输入新密码。');
+      if (saved && saved.keyId === LOCK.keyId) say('网站更新了，请再输入一次密码（每台设备只需一次）。');
+      else if (saved) say('网站密码已经更换，请输入新密码。');
     }).catch(forgetCopy);
   })();
   </script>
