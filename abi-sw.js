@@ -10,6 +10,7 @@ const LOCK_TYPES = {
   html: 'text/html; charset=utf-8', js: 'text/javascript; charset=utf-8', css: 'text/css; charset=utf-8',
   json: 'application/json; charset=utf-8', webmanifest: 'application/manifest+json', png: 'image/png',
   svg: 'image/svg+xml', md: 'text/markdown; charset=utf-8', txt: 'text/plain; charset=utf-8',
+  m4a: 'audio/mp4', wav: 'audio/wav',
 };
 const lockNetwork = self.fetch.bind(self);
 class LockError extends Error {}
